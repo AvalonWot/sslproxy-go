@@ -2,13 +2,20 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -17,8 +24,40 @@ import (
 )
 
 var _listenAddress = flag.String("listen", ":443", "listen adress:port")
-var _proxyUrl = flag.String("proxy", "socks5://127.0.0.1:1080", "proxy url")
-var _proxyDialer socks.Dialer
+var _proxiesFile = flag.String("proxies_file", "proxies.json", "proxies json file path")
+var _useLocalDns = flag.Bool("use_local_dns", true, "switch of use local dns")
+
+var _lock = sync.Mutex{}
+var _index = 0
+var _latest = time.Now()
+var _proxiesDialer []socks.Dialer
+var _localAccelerateTunnel socks.Dialer
+var _resolver *net.Resolver = &net.Resolver{
+	PreferGo: true,
+	Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+		d := net.Dialer{
+			Timeout: time.Millisecond * time.Duration(10000),
+		}
+		return d.DialContext(ctx, network, "114.114.114.114:53")
+	},
+}
+
+func init() {
+	u, err := url.Parse("socks5://127.0.0.1:1080")
+	if err != nil {
+		log.Fatal("解析本地加速代理url错误, 不应该发生")
+		os.Exit(-1)
+	}
+	_localAccelerateTunnel, err = socks.FromURL(u, nil)
+	if err != nil {
+		log.Fatal("生成本地加速代理Dialer错误, 不应该发生")
+		os.Exit(-1)
+	}
+}
+
+type ProxiesConfig struct {
+	Proxies []string `json:"proxies"`
+}
 
 type readOnlyConn struct {
 	reader io.Reader
@@ -70,6 +109,18 @@ func getOriginalDstPort(conn *net.TCPConn) (uint16, error) {
 	if err != nil {
 		return 0, errors.WithMessage(err, "SyscallConn.Control error")
 	}
+	if ierr != nil {
+		tmp := strings.Split(conn.LocalAddr().String(), ":")
+		if len(tmp) == 2 {
+			port, err := strconv.ParseUint(tmp[1], 10, 16)
+			if err != nil {
+				return 0, errors.WithMessage(err, "get local addr port err")
+			}
+			return uint16(port), nil
+		} else {
+			return 0, errors.Errorf("local addr no port: %s", conn.LocalAddr())
+		}
+	}
 	return port, ierr
 }
 
@@ -94,9 +145,26 @@ func trans(left net.Conn) {
 		log.Printf("[ERR] get origin port err: %v\n", err)
 		return
 	}
-	address := fmt.Sprintf("%s:%d", host, port)
-	log.Printf("forward %s\n", address)
-	right, err = _proxyDialer.Dial("tcp", address)
+
+	var address string
+	if *_useLocalDns {
+		ip, err := _resolver.LookupHost(context.Background(), host)
+		if err != nil {
+			log.Printf("forward: 解析dns错误: %v\n", err)
+			return
+		}
+		if len(ip) == 0 {
+			log.Printf("forward: 解析dns返回0个ip\n")
+			return
+		}
+		address = fmt.Sprintf("%s:%d", ip[0], port)
+		log.Printf("forward: %s:%d[%s]\n", host, port, address)
+	} else {
+		address = fmt.Sprintf("%s:%d", host, port)
+		log.Printf("forward %s\n", address)
+	}
+	dialer := getProxyDialer()
+	right, err = dialer.Dial("tcp", address)
 	if err != nil {
 		log.Printf("[ERR] socks to %s error: %v\n", address, err)
 		return
@@ -114,24 +182,47 @@ func trans(left net.Conn) {
 	log.Printf("%s -> %s session quit\n", src, address)
 }
 
-func initProxyDialer(proxyUrl string) error {
-	u, err := url.Parse(proxyUrl)
-	if err != nil {
-		return errors.WithMessage(err, "parse proxy url error")
+func getProxyDialer() socks.Dialer {
+	_lock.Lock()
+	defer _lock.Unlock()
+	if time.Now().After(_latest.Add(10 * time.Minute)) {
+		_latest = time.Now()
+		_index += 1
 	}
-	dialer, err := socks.FromURL(u, nil)
+	return _proxiesDialer[_index%len(_proxiesDialer)]
+}
+
+func initProxyDialer(path string) error {
+	data, err := ioutil.ReadFile(path)
 	if err != nil {
-		return errors.WithMessage(err, "proxy url to socks dialer error")
+		return errors.WithMessage(err, "open porxies josn file err")
 	}
-	_proxyDialer = dialer
+	cfg := ProxiesConfig{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return errors.WithMessage(err, "parse porxies json file err")
+	}
+	for _, purl := range cfg.Proxies {
+		u, err := url.Parse(purl)
+		if err != nil {
+			return errors.WithMessagef(err, "parse proxy url [%s] error", purl)
+		}
+		dialer, err := socks.FromURL(u, _localAccelerateTunnel)
+		if err != nil {
+			return errors.WithMessagef(err, "proxy url [%s] to socks dialer error", purl)
+		}
+		_proxiesDialer = append(_proxiesDialer, dialer)
+	}
+	if len(_proxiesDialer) == 0 {
+		return errors.New("proxies null")
+	}
 	return nil
 }
 
 func main() {
 	flag.Parse()
 
-	if err := initProxyDialer(*_proxyUrl); err != nil {
-		log.Fatalf("init porxy dialer error: %v\n", err)
+	if err := initProxyDialer(*_proxiesFile); err != nil {
+		log.Fatalf("init porxies error: %v\n", err)
 		return
 	}
 
