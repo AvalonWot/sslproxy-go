@@ -24,14 +24,16 @@ import (
 )
 
 var _listenAddress = flag.String("listen", ":443", "listen adress:port")
+var _tunnelUrl = flag.String("tunnel", "socks5://127.0.0.1:1080", "tunnel proxy url")
 var _proxiesFile = flag.String("proxies_file", "proxies.json", "proxies json file path")
 var _useLocalDns = flag.Bool("use_local_dns", true, "switch of use local dns")
 
 var _lock = sync.Mutex{}
 var _index = 0
 var _latest = time.Now()
+var _tunnelDialer socks.Dialer
 var _proxiesDialer []socks.Dialer
-var _localAccelerateTunnel socks.Dialer
+var _proxiesUrl []string
 var _resolver *net.Resolver = &net.Resolver{
 	PreferGo: true,
 	Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -48,7 +50,7 @@ func init() {
 		log.Fatal("解析本地加速代理url错误, 不应该发生")
 		os.Exit(-1)
 	}
-	_localAccelerateTunnel, err = socks.FromURL(u, nil)
+	_tunnelDialer, err = socks.FromURL(u, nil)
 	if err != nil {
 		log.Fatal("生成本地加速代理Dialer错误, 不应该发生")
 		os.Exit(-1)
@@ -163,7 +165,8 @@ func trans(left net.Conn) {
 		address = fmt.Sprintf("%s:%d", host, port)
 		log.Printf("forward %s\n", address)
 	}
-	dialer := getProxyDialer()
+	dialer, purl := getProxyDialer()
+	log.Printf("forward: %s:%d[%s], proxy: %s\n", host, port, address, purl)
 	right, err = dialer.Dial("tcp", address)
 	if err != nil {
 		log.Printf("[ERR] socks to %s error: %v\n", address, err)
@@ -182,14 +185,15 @@ func trans(left net.Conn) {
 	log.Printf("%s -> %s session quit\n", src, address)
 }
 
-func getProxyDialer() socks.Dialer {
+func getProxyDialer() (socks.Dialer, string) {
 	_lock.Lock()
 	defer _lock.Unlock()
 	if time.Now().After(_latest.Add(10 * time.Minute)) {
 		_latest = time.Now()
 		_index += 1
 	}
-	return _proxiesDialer[_index%len(_proxiesDialer)]
+	log.Printf("使用代理索引: %d\n", _index)
+	return _proxiesDialer[_index%len(_proxiesDialer)], _proxiesUrl[_index%len(_proxiesUrl)]
 }
 
 func initProxyDialer(path string) error {
@@ -206,11 +210,12 @@ func initProxyDialer(path string) error {
 		if err != nil {
 			return errors.WithMessagef(err, "parse proxy url [%s] error", purl)
 		}
-		dialer, err := socks.FromURL(u, _localAccelerateTunnel)
+		dialer, err := socks.FromURL(u, _tunnelDialer)
 		if err != nil {
 			return errors.WithMessagef(err, "proxy url [%s] to socks dialer error", purl)
 		}
 		_proxiesDialer = append(_proxiesDialer, dialer)
+		_proxiesUrl = append(_proxiesUrl, purl)
 	}
 	if len(_proxiesDialer) == 0 {
 		return errors.New("proxies null")
@@ -220,6 +225,17 @@ func initProxyDialer(path string) error {
 
 func main() {
 	flag.Parse()
+
+	u, err := url.Parse(*_tunnelUrl)
+	if err != nil {
+		log.Fatal("解析本地加速代理url错误, 不应该发生")
+		os.Exit(-1)
+	}
+	_tunnelDialer, err = socks.FromURL(u, nil)
+	if err != nil {
+		log.Fatal("生成本地加速代理Dialer错误, 不应该发生")
+		os.Exit(-1)
+	}
 
 	if err := initProxyDialer(*_proxiesFile); err != nil {
 		log.Fatalf("init porxies error: %v\n", err)
