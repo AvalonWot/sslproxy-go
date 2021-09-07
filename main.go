@@ -11,6 +11,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -223,6 +224,19 @@ func initProxyDialer(path string) error {
 	return nil
 }
 
+func switchHandler(w http.ResponseWriter, req *http.Request) {
+	_lock.Lock()
+	defer _lock.Unlock()
+
+	_index += 1
+	fmt.Fprintf(w, "替换代理: %s", _proxiesUrl[_index%len(_proxiesUrl)])
+}
+
+func httpServer() {
+	http.HandleFunc("/switch_proxy", switchHandler)
+	log.Fatal(http.ListenAndServe(":8888", nil))
+}
+
 func main() {
 	flag.Parse()
 
@@ -241,6 +255,8 @@ func main() {
 		log.Fatalf("init porxies error: %v\n", err)
 		return
 	}
+
+	go httpServer()
 
 	listener, err := net.Listen("tcp4", *_listenAddress)
 	if err != nil {
