@@ -25,9 +25,9 @@ import (
 )
 
 var _listenAddress = flag.String("listen", ":443", "listen adress:port")
-var _tunnelUrl = flag.String("tunnel", "socks5://127.0.0.1:1080", "tunnel proxy url")
+var _tunnelUrl = flag.String("tunnel", "", "tunnel proxy url")
 var _proxiesFile = flag.String("proxies_file", "proxies.json", "proxies json file path")
-var _useLocalDns = flag.Bool("use_local_dns", true, "switch of use local dns")
+var _useLocalDns = flag.Bool("use_local_dns", false, "switch of use local dns")
 
 var _lock = sync.Mutex{}
 var _index = 0
@@ -43,19 +43,6 @@ var _resolver *net.Resolver = &net.Resolver{
 		}
 		return d.DialContext(ctx, network, "114.114.114.114:53")
 	},
-}
-
-func init() {
-	u, err := url.Parse("socks5://127.0.0.1:1080")
-	if err != nil {
-		log.Fatal("解析本地加速代理url错误, 不应该发生")
-		os.Exit(-1)
-	}
-	_tunnelDialer, err = socks.FromURL(u, nil)
-	if err != nil {
-		log.Fatal("生成本地加速代理Dialer错误, 不应该发生")
-		os.Exit(-1)
-	}
 }
 
 type ProxiesConfig struct {
@@ -240,15 +227,17 @@ func httpServer() {
 func main() {
 	flag.Parse()
 
-	u, err := url.Parse(*_tunnelUrl)
-	if err != nil {
-		log.Fatal("解析本地加速代理url错误, 不应该发生")
-		os.Exit(-1)
-	}
-	_tunnelDialer, err = socks.FromURL(u, nil)
-	if err != nil {
-		log.Fatal("生成本地加速代理Dialer错误, 不应该发生")
-		os.Exit(-1)
+	if len(*_tunnelUrl) > 0 {
+		u, err := url.Parse(*_tunnelUrl)
+		if err != nil {
+			log.Fatal("解析本地加速代理url错误, 不应该发生")
+			os.Exit(-1)
+		}
+		_tunnelDialer, err = socks.FromURL(u, nil)
+		if err != nil {
+			log.Fatal("生成本地加速代理Dialer错误, 不应该发生")
+			os.Exit(-1)
+		}
 	}
 
 	if err := initProxyDialer(*_proxiesFile); err != nil {
