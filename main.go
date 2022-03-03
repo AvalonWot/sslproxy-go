@@ -160,17 +160,18 @@ func trans(left net.Conn) {
 		log.Printf("[ERR] socks to %s error: %v\n", address, err)
 		return
 	}
+	var nup, ndown int64
 	quit := make(chan struct{})
 	go func() {
-		_, _ = io.Copy(right, io.MultiReader(&buff, left))
+		nup, _ = io.Copy(right, io.MultiReader(&buff, left))
 		quit <- struct{}{}
 	}()
 	go func() {
-		_, _ = io.Copy(left, right)
+		ndown, _ = io.Copy(left, right)
 		quit <- struct{}{}
 	}()
 	<-quit
-	log.Printf("%s -> %s session quit\n", src, address)
+	log.Printf("%s -> %s session quit, nup: %d, ndown: %d\n", src, address, nup, ndown)
 }
 
 func getProxyDialer() (socks.Dialer, string) {
